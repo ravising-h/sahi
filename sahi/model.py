@@ -360,6 +360,196 @@ class MmdetDetectionModel(DetectionModel):
         return original_predictions
 
 
+class Detectron2Model(DetectionModel):
+    def load_model(self):
+        """
+        Detection model is initialized and set to self.model.
+        """
+        try:
+            import detectron2
+        except ImportError:
+            raise ImportError(
+                'Please run "python -m pip install 'git+https://github.com/facebookresearch/detectron2.git' " ' "to install detectron2 first for detectron2 inference."
+            )
+
+        from detectron2.engine import DefaultPredictor
+        from detectron2.config import get_cfg
+        
+        cfg = get_cfg()
+        if isinatance(self.config_path, str):
+            cfg.merge_from_file(self.config_path)
+            cfg.freeze()
+        elif type(self.config_path) == type(cfg):
+            cfg = self.config_path
+        else:
+            raise ValueError(
+                "config path can either be path to config file or yacs object"
+            )
+
+        # set model
+        self.model = DefaultPredictor(cfg)
+        
+
+        # set category_mapping
+        if not self.category_mapping:
+            category_mapping = {str(ind): category_name for ind, category_name in enumerate(self.category_names)}
+            self.category_mapping = category_mapping
+
+    def perform_inference(self, image: np.ndarray, image_size: int = None):
+        """
+        Prediction is performed using self.model and the prediction result is set to self._original_predictions.
+        Args:
+            image: np.ndarray
+                A numpy array that contains the image to be predicted.
+            image_size: int
+                Inference input size.
+        """
+        try:
+            import detectron2
+        except ImportError:
+            raise ImportError(
+                'Please run "python -m pip install 'git+https://github.com/facebookresearch/detectron2.git' " ' "to install detectron2 first for detectron2 inference."
+            )
+
+        # Confirm model is loaded
+        assert self.model is not None, "Model is not loaded, load it by calling .load_model()"
+        
+
+        # Supports only batch of 1
+        from detectron2.engine import DefaultPredictor
+
+        # perform inference
+        prediction_result = self.predictor(image)
+
+        self._original_predictions = prediction_result
+
+    @property
+    def num_categories(self):
+        """
+        Returns number of categories
+        """        
+        num_categories = len(self.model.metadata.thing_classes)
+        return num_categories
+
+    @property
+    def has_mask(self):
+        """
+        Returns if model output contains segmentation mask
+        """
+        has_mask = self.model.cfg.MODEL.MASK_ON 
+        return has_mask
+
+    @property
+    def category_names(self):
+
+            return self.model.metadata.thing_classes
+
+    def _create_object_prediction_list_from_original_predictions(
+        self,
+        shift_amount: Optional[List[int]] = [0, 0],
+        full_shape: Optional[List[int]] = None,
+    ):
+        """
+        self._original_predictions is converted to a list of prediction.ObjectPrediction and set to
+        self._object_prediction_list.
+        Args:
+            shift_amount: list
+                To shift the box and mask predictions from sliced image to full sized image, should be in the form of [shift_x, shift_y]
+            full_shape: list
+                Size of the full image after shifting, should be in the form of [height, width]
+        """
+        original_predictions = self._original_predictions
+        category_mapping = self.category_mapping
+
+        # parse boxes and masks from predictions
+        num_categories = self.num_categories
+        
+        classes = outputs['instances'].pred_classes.detach().cpu().numpy().astype(np.uint32)
+        scores  = outputs['instances'].scores.detach().cpu().numpy().astype(np.float16)
+        boxes = original_predictions['instances'].pred_boxes.tensor.detach().cpu().numpy().astype(np.uint32)
+        if self.has_mask:
+            masks = original_predictions['instances'].pred_masks.detach().cpu().numpy()
+
+
+        object_prediction_list = []
+
+        # process predictions
+        for idx,category_id  in enumerate(range(classes)):
+            bbox = boxes[idx]
+            bool_mask = masks[idx] if self.has_mask else None
+            category_name = category_mapping[str(category_id)]
+            score = scores[idx]
+
+            object_prediction = ObjectPrediction(
+                bbox=bbox,
+                category_id=category_id,
+                score=score,
+                bool_mask=bool_mask,
+                category_name=category_name,
+                shift_amount=shift_amount,
+                full_shape=full_shape,
+            )
+            object_prediction_list.append(object_prediction)
+
+        self._object_prediction_list = object_prediction_list
+
+    def _create_original_predictions_from_object_prediction_list(
+        self,
+        object_prediction_list: List[ObjectPrediction],
+    ):
+        """
+        Converts a list of prediction.ObjectPrediction instance to detection model's original prediction format.
+        Then returns the converted predictions.
+        Can be considered as inverse of _create_object_prediction_list_from_predictions().
+        Args:
+            object_prediction_list: a list of prediction.ObjectPrediction
+        Returns:
+            original_predictions: a list of converted predictions in models original output format
+        """
+        # init variables
+#         from detectron2.structures import Boxes, Instances
+#         boxes = []
+#         masks = []
+#         result = Instances(object_prediction_list[0].image_size)
+#         result.pred_boxes = Boxes(boxes_all[keep])
+#         result.scores = scores_all[keep]
+#         result.pred_classes = class_idxs_all[keep]
+#         return result
+#         num_categories = self.num_categories
+#         category_id_list = np.arange(num_categories)
+#         category_id_to_bbox = {category_id: [] for category_id in category_id_list}
+#         category_id_to_mask = {category_id: [] for category_id in category_id_list}
+#         # form category_to_bbox and category_to_mask dicts from object_prediction_list
+#         for object_prediction in object_prediction_list:
+#             category_id = object_prediction.category.id
+#             # form bbox as 1x5 list [xmin, ymin, xmax, ymax, score]
+#             bbox = object_prediction.bbox.to_voc_bbox()
+#             bbox.extend([object_prediction.score.value])
+#             category_id_to_bbox[category_id].append(np.array(bbox, dtype=np.float32))
+#             # form 2d bool mask
+#             if self.has_mask:
+#                 mask = object_prediction.mask.bool_mask
+#                 category_id_to_mask[category_id].append(mask)
+
+#         for category_id in category_id_to_bbox.keys():
+#             if not category_id_to_bbox[category_id]:
+#                 # add 0x5 array to boxes for empty categories
+#                 boxes.append(np.zeros((0, 5), dtype=np.float32))
+#                 if self.has_mask:
+#                     masks.append([])
+#             else:
+#                 # form boxes and masks
+#                 boxes.append(np.array(category_id_to_bbox[category_id]))
+#                 if self.has_mask:
+#                     masks.append(np.array(category_id_to_mask[category_id]))
+#         # form final output
+#         if self.has_mask:
+#             original_predictions = (boxes, masks)
+#         else:
+#             original_predictions = boxes
+
+        return object_prediction_list
+
 class Yolov5DetectionModel(DetectionModel):
     def load_model(self):
         """
